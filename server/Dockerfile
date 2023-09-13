@@ -1,7 +1,7 @@
 from golang as builder
 COPY . /cmd
 WORKDIR /cmd
-ENV GOPATH /
+ENV GOPROXY "https://goproxy.cn"
 RUN go build -o /build/proxy_server main.go
   
 FROM ubuntu as prod
