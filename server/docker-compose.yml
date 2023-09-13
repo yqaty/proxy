@@ -3,4 +3,4 @@ services:
     build: .
     restart: always
     ports:
-      - "10110:10110"
+      - "10010:10010"
