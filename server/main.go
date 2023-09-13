@@ -2,6 +2,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,24 +13,129 @@ import (
 	"net"
 	"strconv"
 	"sync"
+
+	"github.com/spf13/viper"
 )
+
+var listenPort, key string
 
 const bufferSize = 1 << 12
 
-func relay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup) {
+func ReadConfig() {
+	viper.SetConfigName("config")
+	viper.SetConfigType("json")
+	viper.AddConfigPath(".")
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("%w", err))
+	}
+	key = viper.GetString("key")
+	listenPort = viper.GetString("listen_port")
+}
+
+func Pad(buf []byte, n int, size int) ([]byte, error) {
+	padLen := size - n%size
+	for i := 0; i < padLen; i++ {
+		buf[n+i] = byte(padLen)
+	}
+	return buf[:n+padLen], nil
+}
+
+func Unpad(padded []byte, size int) ([]byte, error) {
+	if len(padded)%size != 0 {
+		return nil, errors.New("pkcs7: padded value wasn't in correct size")
+	}
+	bufLen := len(padded) - int(padded[len(padded)-1])
+	return padded[:bufLen], nil
+}
+
+func EncryptAES(key []byte, plainText []byte, n int) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	iv := plainText[n : n+aes.BlockSize]
+	if _, err = io.ReadFull(rand.Reader, iv); err != nil {
+		return nil, err
+	}
+	stream := cipher.NewCFBEncrypter(block, iv)
+	stream.XORKeyStream(plainText[:n], plainText[:n])
+	return plainText[:n+aes.BlockSize], err
+}
+
+func DecryptAES(key []byte, cipherText []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	n := len(cipherText)
+	if n < aes.BlockSize {
+		err = errors.New("ciphertext block size is too short")
+		return nil, err
+	}
+	iv := cipherText[n-aes.BlockSize:]
+	cipherText = cipherText[:n-aes.BlockSize]
+	stream := cipher.NewCFBDecrypter(block, iv)
+	stream.XORKeyStream(cipherText, cipherText)
+	return cipherText, err
+}
+
+func encodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup) {
 	defer wg.Done()
 	data := make([]byte, bufferSize)
 	for {
-		n, err := reader.Read(data)
+		n, err := reader.Read(data[:bufferSize-64])
 		if err != nil {
 			return
 		}
-		_, err = writer.Write(data[:n])
+		data2, err := Pad(data, n, 16)
 		if err != nil {
 			return
 		}
-		err = writer.Flush()
+		data2, err = EncryptAES([]byte(key), data, len(data2))
 		if err != nil {
+			return
+		}
+		l := make([]byte, 2)
+		binary.BigEndian.PutUint16(l, uint16(len(data2)))
+		if _, err := writer.Write(l); err != nil {
+			return
+		}
+		if _, err := writer.Write(data2); err != nil {
+			return
+		}
+		if err := writer.Flush(); err != nil {
+			return
+		}
+	}
+}
+
+func decodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup) {
+	defer wg.Done()
+	data := make([]byte, bufferSize)
+	for {
+		l := make([]byte, 2)
+		_, err := io.ReadFull(reader, l)
+		if err != nil {
+			return
+		}
+		ll := binary.BigEndian.Uint16(l)
+		_, err = io.ReadFull(reader, data[:ll])
+		if err != nil {
+			return
+		}
+		data2, err := DecryptAES([]byte(key), data[:ll])
+		if err != nil {
+			return
+		}
+		data2, err = Unpad(data2, 16)
+		if err != nil {
+			return
+		}
+		if _, err := writer.Write(data2); err != nil {
+			return
+		}
+		if err := writer.Flush(); err != nil {
 			return
 		}
 	}
@@ -105,8 +213,8 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 	writer.Flush()
 	wg := new(sync.WaitGroup)
 	wg.Add(2)
-	go relay(reader, bufio.NewWriter(conn), wg)
-	go relay(bufio.NewReader(conn), writer, wg)
+	go decodeRelay(reader, bufio.NewWriter(conn), wg)
+	go encodeRelay(bufio.NewReader(conn), writer, wg)
 	wg.Wait()
 	return nil
 }
@@ -115,12 +223,11 @@ func Serve(conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReaderSize(conn, bufferSize)
 	writer := bufio.NewWriterSize(conn, bufferSize)
-	err := dealRequest(reader, writer)
-	fmt.Println(err)
+	dealRequest(reader, writer)
 }
 
 func Run() {
-	listener, err := net.Listen("tcp", "127.0.0.1:10010")
+	listener, err := net.Listen("tcp", ":"+listenPort)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -134,5 +241,6 @@ func Run() {
 }
 
 func main() {
+	ReadConfig()
 	Run()
 }
