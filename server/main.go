@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/spf13/viper"
@@ -80,6 +81,29 @@ func DecryptAES(key []byte, cipherText []byte) ([]byte, error) {
 	return cipherText, err
 }
 
+func encodeSend(writer *bufio.Writer, data []byte, n int) error {
+	data2, err := Pad(data, n, 16)
+	if err != nil {
+		return err
+	}
+	data2, err = EncryptAES([]byte(key), data, len(data2))
+	if err != nil {
+		return err
+	}
+	l := make([]byte, 2)
+	binary.BigEndian.PutUint16(l, uint16(len(data2)))
+	if _, err := writer.Write(l); err != nil {
+		return err
+	}
+	if _, err := writer.Write(data2); err != nil {
+		return err
+	}
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func encodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup) {
 	defer wg.Done()
 	data := make([]byte, bufferSize)
@@ -88,47 +112,40 @@ func encodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup)
 		if err != nil {
 			return
 		}
-		data2, err := Pad(data, n, 16)
+		err = encodeSend(writer, data, n)
 		if err != nil {
-			return
-		}
-		data2, err = EncryptAES([]byte(key), data, len(data2))
-		if err != nil {
-			return
-		}
-		l := make([]byte, 2)
-		binary.BigEndian.PutUint16(l, uint16(len(data2)))
-		if _, err := writer.Write(l); err != nil {
-			return
-		}
-		if _, err := writer.Write(data2); err != nil {
-			return
-		}
-		if err := writer.Flush(); err != nil {
 			return
 		}
 	}
+}
+
+func decodeRecevice(reader *bufio.Reader, data []byte) ([]byte, error) {
+	l := make([]byte, 2)
+	_, err := io.ReadFull(reader, l)
+	if err != nil {
+		return nil, err
+	}
+	ll := binary.BigEndian.Uint16(l)
+	_, err = io.ReadFull(reader, data[:ll])
+	if err != nil {
+		return nil, err
+	}
+	data2, err := DecryptAES([]byte(key), data[:ll])
+	if err != nil {
+		return nil, err
+	}
+	data2, err = Unpad(data2, 16)
+	if err != nil {
+		return nil, err
+	}
+	return data2, nil
 }
 
 func decodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup) {
 	defer wg.Done()
 	data := make([]byte, bufferSize)
 	for {
-		l := make([]byte, 2)
-		_, err := io.ReadFull(reader, l)
-		if err != nil {
-			return
-		}
-		ll := binary.BigEndian.Uint16(l)
-		_, err = io.ReadFull(reader, data[:ll])
-		if err != nil {
-			return
-		}
-		data2, err := DecryptAES([]byte(key), data[:ll])
-		if err != nil {
-			return
-		}
-		data2, err = Unpad(data2, 16)
+		data2, err := decodeRecevice(reader, data)
 		if err != nil {
 			return
 		}
@@ -142,46 +159,52 @@ func decodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup)
 }
 
 func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
-	ver, err := reader.ReadByte()
+	data := make([]byte, bufferSize)
+	data, err := decodeRecevice(reader, data)
+	if err != nil {
+		return nil
+	}
+	reads := bufio.NewReader(strings.NewReader(string(data)))
+	ver, err := reads.ReadByte()
 	if err != nil {
 		return err
 	}
 	if ver != 0x05 {
 		return errors.New("unexpected protocol")
 	}
-	cmd, err := reader.ReadByte()
+	cmd, err := reads.ReadByte()
 	if err != nil {
 		return err
 	}
 	if cmd == 0x00 || cmd > 0x03 {
 		return errors.New("unexpected command")
 	}
-	_, err = reader.Discard(1)
+	_, err = reads.Discard(1)
 	if err != nil {
 		return err
 	}
-	atyp, err := reader.ReadByte()
+	atyp, err := reads.ReadByte()
 	if err != nil {
 		return err
 	}
-	if reader.Buffered() <= 2 {
+	if reads.Buffered() <= 2 {
 		return errors.New("unexpected message")
 	}
 	var ip net.IP
 	if atyp == 0x01 || atyp == 0x04 {
 		addr := make([]byte, atyp*4)
-		_, err := io.ReadFull(reader, addr)
+		_, err := io.ReadFull(reads, addr)
 		if err != nil {
 			return err
 		}
 		ip = net.IP(addr)
 	} else if atyp == 0x03 {
-		len, err := reader.ReadByte()
+		len, err := reads.ReadByte()
 		if err != nil {
 			return err
 		}
 		addr := make([]byte, len)
-		_, err = io.ReadFull(reader, addr)
+		_, err = io.ReadFull(reads, addr)
 		if err != nil {
 			return err
 		}
@@ -194,7 +217,7 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 		return errors.New("invaild atyp")
 	}
 	sport := make([]byte, 2)
-	_, err = io.ReadFull(reader, sport)
+	_, err = io.ReadFull(reads, sport)
 	if err != nil {
 		return err
 	}
@@ -204,13 +227,17 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 		return err
 	}
 	defer conn.Close()
+	now := 0
+	copy(data[now:], []byte{0x05, 0x00, 0x00, 0x01})
+	now += 4
 	localaddr := conn.LocalAddr().(*net.TCPAddr)
-	writer.Write([]byte{0x05, 0x00, 0x00, 0x01})
-	writer.Write([]byte(localaddr.IP))
+	copy(data[now:], []byte(localaddr.IP))
+	now += len(localaddr.IP)
 	ports := make([]byte, 2)
 	binary.BigEndian.PutUint16(ports, uint16(localaddr.Port))
-	writer.Write(ports)
-	writer.Flush()
+	copy(data[now:], ports)
+	now += 2
+	encodeSend(writer, data, now)
 	wg := new(sync.WaitGroup)
 	wg.Add(2)
 	go decodeRelay(reader, bufio.NewWriter(conn), wg)

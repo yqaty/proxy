@@ -111,6 +111,29 @@ func authentication(reader *bufio.Reader, writer *bufio.Writer) error {
 	return errors.New("unexpected methods")
 }
 
+func encodeSend(writer *bufio.Writer, data []byte, n int) error {
+	data2, err := Pad(data, n, 16)
+	if err != nil {
+		return err
+	}
+	data2, err = EncryptAES([]byte(key), data, len(data2))
+	if err != nil {
+		return err
+	}
+	l := make([]byte, 2)
+	binary.BigEndian.PutUint16(l, uint16(len(data2)))
+	if _, err := writer.Write(l); err != nil {
+		return err
+	}
+	if _, err := writer.Write(data2); err != nil {
+		return err
+	}
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func encodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup) {
 	defer wg.Done()
 	data := make([]byte, bufferSize)
@@ -119,47 +142,40 @@ func encodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup)
 		if err != nil {
 			return
 		}
-		data2, err := Pad(data, n, 16)
+		err = encodeSend(writer, data, n)
 		if err != nil {
-			return
-		}
-		data2, err = EncryptAES([]byte(key), data, len(data2))
-		if err != nil {
-			return
-		}
-		l := make([]byte, 2)
-		binary.BigEndian.PutUint16(l, uint16(len(data2)))
-		if _, err := writer.Write(l); err != nil {
-			return
-		}
-		if _, err := writer.Write(data2); err != nil {
-			return
-		}
-		if err := writer.Flush(); err != nil {
 			return
 		}
 	}
+}
+
+func decodeRecevice(reader *bufio.Reader, data []byte) ([]byte, error) {
+	l := make([]byte, 2)
+	_, err := io.ReadFull(reader, l)
+	if err != nil {
+		return nil, err
+	}
+	ll := binary.BigEndian.Uint16(l)
+	_, err = io.ReadFull(reader, data[:ll])
+	if err != nil {
+		return nil, err
+	}
+	data2, err := DecryptAES([]byte(key), data[:ll])
+	if err != nil {
+		return nil, err
+	}
+	data2, err = Unpad(data2, 16)
+	if err != nil {
+		return nil, err
+	}
+	return data2, nil
 }
 
 func decodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup) {
 	defer wg.Done()
 	data := make([]byte, bufferSize)
 	for {
-		l := make([]byte, 2)
-		_, err := io.ReadFull(reader, l)
-		if err != nil {
-			return
-		}
-		ll := binary.BigEndian.Uint16(l)
-		_, err = io.ReadFull(reader, data[:ll])
-		if err != nil {
-			return
-		}
-		data2, err := DecryptAES([]byte(key), data[:ll])
-		if err != nil {
-			return
-		}
-		data2, err = Unpad(data2, 16)
+		data2, err := decodeRecevice(reader, data)
 		if err != nil {
 			return
 		}
@@ -183,12 +199,15 @@ func connectRelayServer(reader *bufio.Reader, writer *bufio.Writer) error {
 	if err != nil {
 		return err
 	}
-	conn.Write(data[:n])
-	n, err = conn.Read(data)
+	err = encodeSend(bufio.NewWriter(conn), data, n)
 	if err != nil {
 		return err
 	}
-	_, err = writer.Write(data[:n])
+	data, err = decodeRecevice(bufio.NewReader(conn), data)
+	if err != nil {
+		return err
+	}
+	_, err = writer.Write(data)
 	if err != nil {
 		return err
 	}
