@@ -238,6 +238,7 @@ func Run() {
 		log.Println(err)
 		return
 	}
+	fmt.Println("listening at [::]9090")
 	for {
 		conn, err := client.Accept()
 		if err != nil {
