@@ -213,6 +213,7 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 			return err
 		}
 		ip = ipAddr.IP
+		atyp = 0x01
 	} else {
 		return errors.New("invaild atyp")
 	}
@@ -228,7 +229,7 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 	}
 	defer conn.Close()
 	now := 0
-	copy(data[now:], []byte{0x05, 0x00, 0x00, 0x01})
+	copy(data[now:], []byte{0x05, 0x00, 0x00, atyp})
 	now += 4
 	localaddr := conn.LocalAddr().(*net.TCPAddr)
 	copy(data[now:], []byte(localaddr.IP))
