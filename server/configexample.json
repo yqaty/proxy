@@ -1,0 +1,13 @@
+{
+    "key": "",
+    "listen_port": "10010",
+    "postgres": {
+        "host": "postgres",
+        "user": "postgres",
+        "password": "postgres",
+        "dbname": "postgres",
+        "port": "5432",
+        "sslmode": "disable",
+        "TimeZone": "Asia/Shanghai"
+    }
+}
