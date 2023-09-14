@@ -160,11 +160,11 @@ func decodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup)
 
 func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 	data := make([]byte, bufferSize)
-	data, err := decodeRecevice(reader, data)
+	data2, err := decodeRecevice(reader, data)
 	if err != nil {
 		return err
 	}
-	reads := bufio.NewReader(strings.NewReader(string(data)))
+	reads := bufio.NewReader(strings.NewReader(string(data2)))
 	ver, err := reads.ReadByte()
 	if err != nil {
 		return err
@@ -213,11 +213,6 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 			return err
 		}
 		ip = ipAddr.IP
-		if len(ip) == 4 {
-			atyp = 0x01
-		} else {
-			atyp = 0x04
-		}
 	} else {
 		return errors.New("invaild atyp")
 	}
@@ -233,9 +228,15 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 	}
 	defer conn.Close()
 	now := 0
-	copy(data[now:], []byte{0x05, 0x00, 0x00, atyp})
-	now += 4
+	copy(data[now:], []byte{0x05, 0x00, 0x00})
+	now += 3
 	localaddr := conn.LocalAddr().(*net.TCPAddr)
+	if len(localaddr.IP) == 4 {
+		copy(data[now:], []byte{0x01})
+	} else {
+		copy(data[now:], []byte{0x04})
+	}
+	now++
 	copy(data[now:], []byte(localaddr.IP))
 	now += len(localaddr.IP)
 	ports := make([]byte, 2)
