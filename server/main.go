@@ -162,7 +162,7 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 	data := make([]byte, bufferSize)
 	data, err := decodeRecevice(reader, data)
 	if err != nil {
-		return nil
+		return err
 	}
 	reads := bufio.NewReader(strings.NewReader(string(data)))
 	ver, err := reads.ReadByte()
@@ -199,11 +199,11 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 		}
 		ip = net.IP(addr)
 	} else if atyp == 0x03 {
-		len, err := reads.ReadByte()
+		l, err := reads.ReadByte()
 		if err != nil {
 			return err
 		}
-		addr := make([]byte, len)
+		addr := make([]byte, l)
 		_, err = io.ReadFull(reads, addr)
 		if err != nil {
 			return err
@@ -213,7 +213,11 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 			return err
 		}
 		ip = ipAddr.IP
-		atyp = 0x01
+		if len(ip) == 4 {
+			atyp = 0x01
+		} else {
+			atyp = 0x04
+		}
 	} else {
 		return errors.New("invaild atyp")
 	}
