@@ -1,6 +1,17 @@
 services:
   web:
     build: .
-    restart: always
+    restart: "always"
+    depends_on:
+      - postgres
+    links:
+      - postgres
     ports:
       - "10010:10010"
+  postgres:
+    image: postgres
+    environment:
+      POSTGRES_PASSWORD: postgres
+    restart: "always"
+    expose:
+      - 5432

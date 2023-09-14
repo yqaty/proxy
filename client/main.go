@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-var key, serverIP, serverPort, listenPort string
+var key, serverIP, serverPort, listenPort, userName, password string
 
 const (
 	bufferSize = 1 << 12
@@ -34,6 +34,8 @@ func ReadConfig() {
 	serverIP = viper.GetString("server_ip")
 	serverPort = viper.GetString("server_port")
 	listenPort = viper.GetString("listen_port")
+	userName = viper.GetString("user_name")
+	password = viper.GetString("password")
 }
 
 func Pad(buf []byte, n int, size int) ([]byte, error) {
@@ -188,12 +190,45 @@ func decodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup)
 	}
 }
 
+func identify(reader *bufio.Reader, writer *bufio.Writer) (bool, error) {
+	data := make([]byte, bufferSize)
+	now := 0
+	uLen := make([]byte, 2)
+	pLen := make([]byte, 2)
+	binary.BigEndian.PutUint16(uLen, uint16(len(userName)))
+	copy(data[now:], uLen)
+	now += 2
+	copy(data[now:], []byte(userName))
+	now += len(userName)
+	binary.BigEndian.PutUint16(pLen, uint16(len(password)))
+	copy(data[now:], pLen)
+	now += 2
+	copy(data[now:], []byte(password))
+	now += len(password)
+	err := encodeSend(writer, data, now)
+	if err != nil {
+		return false, err
+	}
+	data, err = decodeRecevice(reader, data)
+	if err != nil {
+		return false, err
+	}
+	return data[0] == 0x00, nil
+}
+
 func connectRelayServer(reader *bufio.Reader, writer *bufio.Writer) error {
 	conn, err := net.Dial("tcp", serverIP+":"+serverPort)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	bo, err := identify(bufio.NewReader(conn), bufio.NewWriter(conn))
+	if err != nil {
+		return err
+	}
+	if !bo {
+		return errors.New("uncorrect password")
+	}
 	data := make([]byte, bufferSize)
 	n, err := reader.Read(data)
 	if err != nil {

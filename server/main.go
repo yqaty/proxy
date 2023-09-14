@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 
+	"proxy/server/db"
+
 	"github.com/spf13/viper"
 )
 
@@ -252,10 +254,41 @@ func dealRequest(reader *bufio.Reader, writer *bufio.Writer) error {
 	return nil
 }
 
+func identify(reader *bufio.Reader, writer *bufio.Writer) bool {
+	data := make([]byte, bufferSize)
+	_, err := decodeRecevice(reader, data)
+	if err != nil {
+		return false
+	}
+	now := 0
+	l := binary.BigEndian.Uint16(data[now : now+2])
+	now += 2
+	userName := string(data[now : now+int(l)])
+	now += int(l)
+	l = binary.BigEndian.Uint16(data[now : now+2])
+	now += 2
+	password := string(data[now : now+int(l)])
+	now += int(l)
+	bo, _ := db.CheckPassword(&db.User{UserName: userName, Password: password})
+	if !bo {
+		data[0] = 0x01
+		encodeSend(writer, data, 1)
+		return false
+	} else {
+		data[0] = 0x00
+		encodeSend(writer, data, 1)
+		return true
+	}
+}
+
 func Serve(conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReaderSize(conn, bufferSize)
 	writer := bufio.NewWriterSize(conn, bufferSize)
+	bo := identify(reader, writer)
+	if !bo {
+		return
+	}
 	dealRequest(reader, writer)
 }
 
@@ -275,5 +308,8 @@ func Run() {
 
 func main() {
 	ReadConfig()
+	db.ReadDB()
+	db.InitUser()
+	db.AddUser(&db.User{UserName: "yqaty", Password: "123456"})
 	Run()
 }
