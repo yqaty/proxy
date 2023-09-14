@@ -4,5 +4,6 @@
     "server_port": "10010",
     "listen_port": "9090",
     "user_name": "",
-    "password": ""
+    "password": "",
+    "global": true
 }

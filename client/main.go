@@ -11,12 +11,15 @@ import (
 	"io"
 	"log"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/spf13/viper"
 )
 
 var key, serverIP, serverPort, listenPort, userName, password string
+var global bool
 
 const (
 	bufferSize = 1 << 12
@@ -36,6 +39,7 @@ func ReadConfig() {
 	listenPort = viper.GetString("listen_port")
 	userName = viper.GetString("user_name")
 	password = viper.GetString("password")
+	global = viper.GetBool("global")
 }
 
 func Pad(buf []byte, n int, size int) ([]byte, error) {
@@ -190,6 +194,25 @@ func decodeRelay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup)
 	}
 }
 
+func Relay(reader *bufio.Reader, writer *bufio.Writer, wg *sync.WaitGroup) {
+	defer wg.Done()
+	data := make([]byte, bufferSize)
+	for {
+		n, err := reader.Read(data)
+		if err != nil {
+			return
+		}
+		_, err = writer.Write(data[:n])
+		if err != nil {
+			return
+		}
+		err = writer.Flush()
+		if err != nil {
+			return
+		}
+	}
+}
+
 func identify(reader *bufio.Reader, writer *bufio.Writer) (bool, error) {
 	data := make([]byte, bufferSize)
 	now := 0
@@ -216,6 +239,104 @@ func identify(reader *bufio.Reader, writer *bufio.Writer) (bool, error) {
 	return data[0] == 0x00, nil
 }
 
+func dealRequest(reader *bufio.Reader, writer *bufio.Writer, reads *bufio.Reader) error {
+	ver, err := reads.ReadByte()
+	if err != nil {
+		return err
+	}
+	if ver != 0x05 {
+		return errors.New("unexpected protocol")
+	}
+	cmd, err := reads.ReadByte()
+	if err != nil {
+		return err
+	}
+	if cmd == 0x00 || cmd > 0x03 {
+		return errors.New("unexpected command")
+	}
+	_, err = reads.Discard(1)
+	if err != nil {
+		return err
+	}
+	atyp, err := reads.ReadByte()
+	if err != nil {
+		return err
+	}
+	if reads.Buffered() <= 2 {
+		return errors.New("unexpected message")
+	}
+	var ip net.IP
+	if atyp == 0x01 || atyp == 0x04 {
+		addr := make([]byte, atyp*4)
+		_, err := io.ReadFull(reads, addr)
+		if err != nil {
+			return err
+		}
+		ip = net.IP(addr)
+	} else if atyp == 0x03 {
+		l, err := reads.ReadByte()
+		if err != nil {
+			return err
+		}
+		addr := make([]byte, l)
+		_, err = io.ReadFull(reads, addr)
+		if err != nil {
+			return err
+		}
+		ipAddr, err := net.ResolveIPAddr("ip", string(addr))
+		if err != nil {
+			return err
+		}
+		ip = ipAddr.IP
+	} else {
+		return errors.New("invaild atyp")
+	}
+	sport := make([]byte, 2)
+	_, err = io.ReadFull(reads, sport)
+	if err != nil {
+		return err
+	}
+	port := binary.BigEndian.Uint16(sport)
+	//fmt.Println(ip.String(), port)
+	conn, err := net.Dial("tcp", ip.String()+":"+strconv.Itoa(int(port)))
+	//fmt.Println(err)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	now := 0
+	data := make([]byte, bufferSize)
+	copy(data[now:], []byte{0x05, 0x00, 0x00})
+	now += 3
+	localaddr := conn.LocalAddr().(*net.TCPAddr)
+	if len(localaddr.IP) == 4 {
+		copy(data[now:], []byte{0x01})
+	} else {
+		copy(data[now:], []byte{0x04})
+	}
+	now++
+	copy(data[now:], []byte(localaddr.IP))
+	now += len(localaddr.IP)
+	ports := make([]byte, 2)
+	binary.BigEndian.PutUint16(ports, uint16(localaddr.Port))
+	copy(data[now:], ports)
+	now += 2
+	_, err = writer.WriteString(string(data[:now]))
+	if err != nil {
+		return err
+	}
+	err = writer.Flush()
+	if err != nil {
+		return err
+	}
+	wg := new(sync.WaitGroup)
+	wg.Add(2)
+	go Relay(reader, bufio.NewWriter(conn), wg)
+	go Relay(bufio.NewReader(conn), writer, wg)
+	wg.Wait()
+	return nil
+}
+
 func connectRelayServer(reader *bufio.Reader, writer *bufio.Writer) error {
 	conn, err := net.Dial("tcp", serverIP+":"+serverPort)
 	if err != nil {
@@ -229,10 +350,18 @@ func connectRelayServer(reader *bufio.Reader, writer *bufio.Writer) error {
 	if !bo {
 		return errors.New("uncorrect password")
 	}
+
 	data := make([]byte, bufferSize)
 	n, err := reader.Read(data)
 	if err != nil {
 		return err
+	}
+	if !global {
+		err := dealRequest(reader, writer, bufio.NewReader(strings.NewReader(string(data[:n]))))
+		//fmt.Println("!!")
+		if err == nil {
+			return nil
+		}
 	}
 	err = encodeSend(bufio.NewWriter(conn), data, n)
 	if err != nil {
@@ -246,7 +375,10 @@ func connectRelayServer(reader *bufio.Reader, writer *bufio.Writer) error {
 	if err != nil {
 		return err
 	}
-	writer.Flush()
+	err = writer.Flush()
+	if err != nil {
+		return err
+	}
 	wg := new(sync.WaitGroup)
 	wg.Add(2)
 	go encodeRelay(reader, bufio.NewWriter(conn), wg)
@@ -273,7 +405,7 @@ func Run() {
 		log.Println(err)
 		return
 	}
-	fmt.Println("listening at [::]9090")
+	fmt.Println("listening at [::]" + listenPort)
 	for {
 		conn, err := client.Accept()
 		if err != nil {
